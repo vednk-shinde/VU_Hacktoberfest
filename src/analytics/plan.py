@@ -4,6 +4,9 @@ Plans are data, never executable code. All operations, columns, joins, dependenc
 filters, and result sizes are validated before the first step runs.
 """
 from collections import defaultdict
+import hashlib
+import json
+import uuid
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from src.ingestion.loader import Dataset, to_number
@@ -196,13 +199,42 @@ class AnalyticalPlanExecutor:
                     cols.update(right_cols - {b for a, b in pairs if a == b})
                     types.update({c: t for c, t in right_types.items() if not any(c == b and a == b for a, b in pairs)})
                 elif op == "rank":
-                    if step.get("column") not in cols or step.get("limit", 0) <= 0 or step.get("limit", 0) > self.max_rows:
+                    rank_column = step.get("column")
+                    limit = step.get("limit")
+                    descending = step.get("descending")
+                    if (not isinstance(rank_column, str) or rank_column not in cols or
+                            type(limit) is not int or limit <= 0 or limit > self.max_rows or
+                            type(descending) is not bool):
                         raise PlanError(f"Invalid rank column or limit in {sid}.")
+                    if types.get(rank_column) not in {"numeric", "text"}:
+                        raise PlanError(f"Rank column {rank_column} has an unsupported or mixed type.")
                 schemas[sid] = {"columns": cols, "origins": origins, "types": types}
                 row_origins[sid] = origins
         result_refs = plan.get("outputs", [steps[-1]["id"]])
         if not isinstance(result_refs, list) or not result_refs or any(ref not in schemas for ref in result_refs):
             raise PlanError("Plan outputs must reference existing steps.")
+        semantics = plan.get("result_semantics")
+        if semantics is not None:
+            if not isinstance(semantics, dict) or set(semantics) != {"source_facts", "computed_results", "assumptions"}:
+                raise PlanError("Result semantics must contain source_facts, computed_results, and assumptions.")
+            if (not isinstance(semantics["source_facts"], list) or
+                    any(not isinstance(item, str) or not item.strip() for item in semantics["source_facts"])):
+                raise PlanError("Result source facts must be non-empty descriptions.")
+            computed = semantics["computed_results"]
+            if (not isinstance(computed, dict) or not set(computed).issubset(result_refs) or
+                    any(not isinstance(item, str) or not item.strip() for item in computed.values())):
+                raise PlanError("Computed-result descriptions must reference emitted outputs.")
+            assumptions = semantics["assumptions"]
+            if not isinstance(assumptions, list):
+                raise PlanError("Result assumptions must be a list.")
+            for item in assumptions:
+                if not isinstance(item, dict) or set(item) != {"claim", "description", "metric"}:
+                    raise PlanError("Each assumption must contain claim, description, and metric.")
+                if any(not isinstance(item[key], str) or not item[key].strip()
+                       for key in ("claim", "description", "metric")):
+                    raise PlanError("Assumption fields must be non-empty strings.")
+                if not any(item["metric"] in schema["columns"] for schema in schemas.values()):
+                    raise PlanError(f"Assumption metric is not produced by the plan: {item['metric']}.")
         return schemas
 
     def execute(self, plan: Dict[str, Any], user: Optional[UserContext] = None,
@@ -230,7 +262,10 @@ class AnalyticalPlanExecutor:
                 for row in source:
                     buckets[tuple(row[c] for c in step["group_by"])].append(row)
                 rows = []
-                for key, members in buckets.items():
+                for key, members in sorted(
+                    buckets.items(),
+                    key=lambda item: json.dumps(item[0], ensure_ascii=False, default=str),
+                ):
                     out = dict(zip(step["group_by"], key))
                     for alias, spec in step["metrics"].items():
                         vals = [to_number(x.get(spec["column"])) for x in members]
@@ -244,7 +279,11 @@ class AnalyticalPlanExecutor:
                 source = results[step["input"]]
                 groups = defaultdict(dict)
                 for row in source:
-                    groups[tuple(row[c] for c in step["group_by"])][row[step["period_column"]]] = row
+                    group_key = tuple(row[c] for c in step["group_by"])
+                    period_key = row[step["period_column"]]
+                    if period_key in groups[group_key]:
+                        raise PlanError(f"Comparison input contains duplicate period rows for step {sid}.")
+                    groups[group_key][period_key] = row
                 rows = []
                 missing = 0
                 for key, periods in groups.items():
@@ -292,18 +331,75 @@ class AnalyticalPlanExecutor:
                             raise PlanError(f"Join step {sid} exceeded the {self.max_rows}-row execution limit.")
             elif op == "rank":
                 source = results[step["input"]]
-                present = [r for r in source if r.get(step["column"]) is not None]
-                missing = [r for r in source if r.get(step["column"]) is None]
-                present.sort(key=lambda r: r[step["column"]], reverse=step.get("descending", True))
+                is_missing = lambda value: value is None or (isinstance(value, str) and not value.strip())
+                present = [r for r in source if not is_missing(r.get(step["column"]))]
+                missing = [r for r in source if is_missing(r.get(step["column"]))]
+                # Canonical row order breaks metric ties independently of source row order.
+                present.sort(key=lambda row: json.dumps(row, sort_keys=True, ensure_ascii=False, default=str))
+                input_types = schemas[step["input"]]["types"]
+                rank_column = step["column"]
+                if input_types.get(rank_column) == "numeric":
+                    present.sort(key=lambda row: to_number(row[rank_column]), reverse=step["descending"])
+                else:
+                    present.sort(key=lambda row: row[rank_column], reverse=step["descending"])
                 rows = (present + missing)[:step["limit"]]
             if len(rows) > self.max_rows:
                 raise PlanError(f"Step {sid} exceeded the {self.max_rows}-row execution limit.")
             results[sid] = rows
         outputs = {ref: results[ref] for ref in plan.get("outputs", [plan["steps"][-1]["id"]])}
+        executed_steps = [self._step_evidence(step, len(results[step["id"]]), self.datasets)
+                          for step in plan["steps"]]
+        output_refs = [{"step_id": ref, "row_count": len(results[ref])} for ref in outputs]
+        plan_bytes = json.dumps(plan, sort_keys=True, ensure_ascii=False,
+                                separators=(",", ":"), default=str).encode("utf-8")
         return {"outputs": outputs, "steps": results,
                 "evidence": {"plan_step_count": len(plan["steps"]), "row_counts": {k: len(v) for k, v in results.items()},
                              "comparison_groups_missing_periods": comparison_gaps,
-                             "datasets": provenance or {name: {"dataset_name": ds.name} for name, ds in self.datasets.items()}}}
+                             "datasets": provenance or {name: {"dataset_name": ds.name} for name, ds in self.datasets.items()},
+                             "execution": {"schema_version": 1, "execution_id": str(uuid.uuid4()),
+                                           "status": "completed", "plan_sha256": hashlib.sha256(plan_bytes).hexdigest(),
+                                           "operations": executed_steps, "outputs": output_refs,
+                                           "result_semantics": plan.get("result_semantics"),
+                                           "result_reference": "QAResult.answer"}}}
+
+    @staticmethod
+    def _safe_filter_evidence(node: Any):
+        if isinstance(node, dict) and "criteria" in node:
+            return {"combinator": node.get("combinator", "AND"),
+                    "criteria": [AnalyticalPlanExecutor._safe_filter_evidence(x) for x in node["criteria"]]}
+        if isinstance(node, dict):
+            item = {k: node[k] for k in ("column", "operator") if k in node}
+            if "value" in node:
+                item["value_redacted"] = True
+            return item
+        if hasattr(node, "criteria"):
+            return {"combinator": node.combinator,
+                    "criteria": [AnalyticalPlanExecutor._safe_filter_evidence(x) for x in node.criteria]}
+        if hasattr(node, "column"):
+            return {"column": node.column, "operator": node.operator,
+                    "value_redacted": True}
+        return None
+
+    @classmethod
+    def _step_evidence(cls, step: Dict[str, Any], row_count: int,
+                       datasets: Optional[Dict[str, Dataset]] = None) -> Dict[str, Any]:
+        op = step["op"]
+        item = {"step_id": step["id"], "operation": op, "status": "completed", "row_count": row_count}
+        fields = {
+            "scan": ("dataset", "columns"),
+            "filter": ("input",),
+            "aggregate": ("input", "group_by", "metrics"),
+            "compare_periods": ("input", "group_by", "period_column", "previous", "current", "metrics"),
+            "derive": ("input", "calculations"),
+            "join": ("left", "right", "on"),
+            "rank": ("input", "column", "limit", "descending"),
+        }
+        item.update({key: step[key] for key in fields[op] if key in step})
+        if op == "scan" and "columns" not in item and datasets is not None:
+            item["columns"] = list(datasets[step["dataset"]].columns)
+        if "filter" in step:
+            item["filter"] = cls._safe_filter_evidence(step["filter"])
+        return item
 
     @staticmethod
     def _value(row, value):

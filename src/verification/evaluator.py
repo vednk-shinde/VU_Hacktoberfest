@@ -17,6 +17,7 @@ class QAResult:
     evidence: Optional[Dict[str, Any]] = None
     reason: Optional[str] = None
     explanation: Optional[str] = None
+    explanation_source: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -28,6 +29,7 @@ class QAResult:
             "evidence": self.evidence,
             "reason": self.reason,
             "explanation": self.explanation,
+            "explanation_source": self.explanation_source,
         }
 
 

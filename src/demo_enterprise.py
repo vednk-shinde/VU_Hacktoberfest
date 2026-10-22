@@ -33,6 +33,10 @@ PLAN = {
          "metrics": {"units": {"function": "sum", "column": "units"}, "revenue": {"function": "sum", "column": "revenue"}}},
         {"id": "product_comparison", "op": "compare_periods", "input": "by_product_period", "group_by": ["product_id"],
          "period_column": "period", "previous": "previous", "current": "current", "metrics": ["units", "revenue"]},
+        {"id": "product_trends", "op": "filter", "input": "product_comparison",
+         "filter": {"combinator": "AND", "criteria": [
+             {"column": "units_change", "operator": ">", "value": 0},
+             {"column": "revenue_change", "operator": "<", "value": 0}]}},
         {"id": "product_metrics", "op": "derive", "input": "product_comparison", "calculations": {
             "asp_previous": {"op": "divide", "left": "revenue_previous", "right": "units_previous"},
             "asp_current": {"op": "divide", "left": "revenue_current", "right": "units_current"}}},
@@ -54,8 +58,24 @@ PLAN = {
         {"id": "regional_metrics", "op": "derive", "input": "regional_comparison", "calculations": {
             "asp_previous": {"op": "divide", "left": "revenue_previous", "right": "units_previous"},
             "asp_current": {"op": "divide", "left": "revenue_current", "right": "units_current"}}},
+        {"id": "regional_decline_ranked", "op": "rank", "input": "regional_metrics",
+         "column": "revenue_change_pct", "descending": False, "limit": 1},
     ],
-    "outputs": ["supplier_risk", "regional_metrics"],
+    "outputs": ["supplier_risk", "regional_metrics", "regional_decline_ranked", "product_trends"],
+    "result_semantics": {
+        "source_facts": ["The source datasets contain recorded sales, inventory, product, and supplier fields."],
+        "computed_results": {
+            "supplier_risk": "Current-period unit demand compared with recorded on-hand stock, joined to product and supplier records.",
+            "regional_metrics": "Sales totals and period-over-period unit and revenue changes grouped by region.",
+            "regional_decline_ranked": "Regions ordered by percentage revenue change, most negative first; ties use stable row ordering.",
+            "product_trends": "Products with positive unit change and negative revenue change across the compared periods.",
+        },
+        "assumptions": [{
+            "claim": "scenario_revenue_exposure",
+            "description": "This scenario assumes estimated shortage units could be fulfilled at current average selling price; it is not observed lost or recovered revenue.",
+            "metric": "scenario_revenue_exposure",
+        }],
+    },
 }
 
 
@@ -96,7 +116,7 @@ def compile_workflow_proposal(proposed, allowed_relationships):
     if any(not required.issubset(set(proposed["columns"][name]))
            for name, required in required_columns.items()):
         raise ValueError("Model proposal omitted columns required by the supported workflow.")
-    required_ops = {"scan", "aggregate", "compare_periods", "derive", "join", "filter"}
+    required_ops = {"scan", "aggregate", "compare_periods", "derive", "join", "filter", "rank"}
     if set(proposed["operations"]) != required_ops:
         raise ValueError("Model proposal did not select the complete supported operation set.")
     rel_keys = ("left_dataset", "left_key", "right_dataset", "right_key")
@@ -114,7 +134,7 @@ def run_demo(use_gemma=False):
     plan = PLAN
     gemma_metrics = None
     if use_gemma:
-        client = OllamaClient(model_name="gemma3:4b", timeout_seconds=90)
+        client = OllamaClient()
         if not client.is_healthy():
             gemma_metrics = {"planning_success": False, "reason": "Local Ollama is unavailable."}
         else:

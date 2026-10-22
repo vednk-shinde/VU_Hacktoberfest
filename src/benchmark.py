@@ -182,7 +182,7 @@ def run_gemma_model_benchmark(
     from src.models.ollama_client import OllamaClient
     from src.reasoning.llm_planner import GemmaQueryPlanner
 
-    client = OllamaClient(base_url="http://localhost:11434", model_name="gemma3:4b")
+    client = OllamaClient()
     if not client.is_healthy():
         print("Ollama service offline. Cannot run Gemma benchmark.")
         return {"error": "Ollama service offline"}

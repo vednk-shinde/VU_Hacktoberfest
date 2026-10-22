@@ -50,12 +50,12 @@ def validate_intent(intent: QueryIntent, dataset: Dataset) -> ValidationResult:
     # 3. Validate numeric aggregation compatibility
     if intent.operation == Operation.NUMERIC_AGGREGATION and intent.column is not None:
         col_type = dataset.column_types.get(intent.column, "unknown")
-        if col_type == "text":
+        if col_type in {"text", "mixed", "date", "boolean", "invalid_numeric"}:
             return ValidationResult(
                 is_valid=False,
                 reason=(
                     f"Cannot compute {intent.agg_function} on non-numeric column '{intent.column}' "
-                    f"(detected type: text)."
+                    f"(detected type: {col_type})."
                 ),
             )
 

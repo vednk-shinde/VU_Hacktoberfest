@@ -7,6 +7,7 @@ from src.reasoning.validator import filter_columns, validate_intent
 from src.retrieval.db_executor import CompoundFilter, DatabaseExecutor, FilterCriterion
 from src.security.permissions import UserContext, can_access_columns, can_access_dataset
 from src.verification.evaluator import QAResult, evaluate_intent
+from src.verification.evidence import deterministic_explanation, not_executed_record, single_execution_record
 
 
 def _dict_to_filter(f_dict: Optional[Dict[str, Any]]) -> Optional[Union[FilterCriterion, CompoundFilter]]:
@@ -74,6 +75,8 @@ class QAEngine:
         Load and cache a dataset for subsequent queries.
         Supports direct file paths, in-memory Dataset objects, or registered dataset IDs.
         """
+        # A failed selection must not leave a prior dataset queryable by accident.
+        self._dataset = None
         self._active_dataset_id = None
         self._active_dataset_version = None
         self._db_executor = None
@@ -170,7 +173,8 @@ class QAEngine:
             try:
                 ds = self.load(dataset_path, version=version, user_context=user_context)
             except PermissionError as err:
-                return QAResult(question=question, status="abstained", answer=None, reason=str(err))
+                return QAResult(question=question, status="abstained", answer=None, reason=str(err),
+                                evidence={"execution": not_executed_record("dataset_permission_denied")})
 
         if ds is None:
             return QAResult(
@@ -187,11 +191,13 @@ class QAEngine:
                 status="abstained",
                 answer=None,
                 reason=f"Access denied: An authorized user context is required for dataset '{self._active_dataset_id}'.",
+                evidence={"execution": not_executed_record("dataset_permission_denied")},
             )
 
         # 2. Query planning (Gemma 3 4B or rule-based parser)
         intent = None
         compound_filter = None
+        planning_source = "deterministic_parser"
 
         if use_gemma and self.gemma_planner is not None:
             try:
@@ -209,7 +215,8 @@ class QAEngine:
                     compound_filter = _dict_to_filter(f_dict)
                 except ValueError as err:
                     return QAResult(question=question, status="abstained", answer=None,
-                                    operation=op, reason=f"Invalid model filter: {err}")
+                                    operation=op, reason=f"Invalid model filter: {err}",
+                                    evidence={"execution": not_executed_record("invalid_model_filter", ds, op)})
 
                 # Convert to QueryIntent
                 intent = QueryIntent(
@@ -223,9 +230,11 @@ class QAEngine:
                     abstain_reason=plan.get("reason"),
                     compound_filter=compound_filter,
                 )
+                planning_source = "gemma_validated_intent"
             except Exception as err:
                 # Fallback to rule-based parser on model failure or unreachable Ollama
                 intent = parse_question(question, ds.columns)
+                planning_source = "deterministic_parser_fallback"
 
         if intent is None:
             intent = parse_question(question, ds.columns)
@@ -247,6 +256,7 @@ class QAEngine:
                     answer=None,
                     operation=intent.operation,
                     reason=f"Access denied: User lacks permission for column(s) {unauthorized}.",
+                    evidence={"execution": not_executed_record("column_permission_denied")},
                 )
 
         # 4. Schema validation
@@ -258,6 +268,7 @@ class QAEngine:
                 answer=None,
                 operation=intent.operation,
                 reason=validation.reason,
+                evidence={"execution": not_executed_record("schema_validation_failed", ds, intent.operation)},
             )
 
         # Handle empty datasets
@@ -268,31 +279,45 @@ class QAEngine:
                 answer=None,
                 operation=intent.operation,
                 reason="Dataset contains 0 rows; cannot perform requested calculation.",
+                evidence={"execution": not_executed_record("empty_dataset", ds, intent.operation)},
             )
 
         # 5. Deterministic Execution (Database pushdown or in-memory)
-        if self._db_executor is not None and (compound_filter is not None or self.enable_db_pushdown):
-            result = self._execute_via_db(intent, compound_filter, ds)
-        else:
-            result = evaluate_intent(intent, ds)
+        db_supported = intent.operation in {Operation.ROW_COUNT, Operation.FILTER_COUNT,
+                                            Operation.NUMERIC_AGGREGATION, Operation.CATEGORY_COUNT}
+        backend = ("sqlite" if db_supported and self._db_executor is not None and
+                   (compound_filter is not None or self.enable_db_pushdown) else "in_memory")
+        execution_failed = False
+        try:
+            if backend == "sqlite":
+                result = self._execute_via_db(intent, compound_filter, ds)
+            else:
+                result = evaluate_intent(intent, ds)
+        except Exception as err:
+            execution_failed = True
+            failure_record = not_executed_record("execution_error", ds, intent.operation)
+            failure_record["status"] = "failed"
+            result = QAResult(question=question, status="abstained", answer=None,
+                              operation=intent.operation,
+                              reason=f"Execution failed ({type(err).__name__}); no result was verified.",
+                              evidence={"execution": failure_record})
 
         # 6. Attach dataset provenance
-        if self._active_dataset_id is not None and result.evidence is not None:
+        result.evidence = result.evidence or {}
+        if not execution_failed:
+            result.evidence["execution"] = single_execution_record(
+                result, ds, intent, backend, planning_source=planning_source
+            )
+        if self._active_dataset_id is not None:
             result.evidence["dataset_id"] = self._active_dataset_id
             result.evidence["dataset_version"] = self._active_dataset_version
 
         # 7. Grounded explanation from verified result (Gemma 3 4B)
-        if explain_with_gemma and self.gemma_planner is not None and result.status == "answered":
-            try:
-                explanation = self.gemma_planner.explain_result(
-                    question=question,
-                    result=result,
-                    dataset_name=self._active_dataset_id or ds.name,
-                    dataset_version=self._active_dataset_version,
-                )
-                result.explanation = explanation
-            except Exception:
-                result.explanation = f"Verified {result.operation}: {result.answer} (Dataset: {self._active_dataset_id or ds.name})"
+        # Explanations stay deterministic even when the legacy explain_with_gemma flag is set.
+        result.explanation = deterministic_explanation(
+            result, self._active_dataset_id or ds.name, self._active_dataset_version
+        )
+        result.explanation_source = "deterministic_execution_evidence"
 
         return result
 
@@ -381,22 +406,41 @@ class QAEngine:
         versions: Optional[Dict[str, int]] = None,
     ) -> QAResult:
         """Validate and execute a bounded multi-dataset analytical plan."""
-        from src.analytics.plan import AnalyticalPlanExecutor, PlanError
+        from src.analytics.plan import AnalyticalPlanExecutor
         from src.storage.manager import compute_sha256
+        from src.verification.evidence import dataset_provenance
         loaded, provenance = {}, {}
+        plan_validated = False
         try:
             for name, source in dataset_sources.items():
                 reader = QAEngine(registry_service=self.registry, approved_file_roots=self.approved_file_roots)
                 ds = reader.load(source, version=(versions or {}).get(name), user_context=user_context)
                 ds.dataset_id, ds.dataset_version = reader._active_dataset_id, reader._active_dataset_version
                 loaded[name] = ds
-                provenance[name] = {"dataset_id": ds.dataset_id, "dataset_version": ds.dataset_version,
-                                    "source_file": ds.file_path.name,
+                provenance[name] = {**dataset_provenance(ds),
                                     "checksum_sha256": compute_sha256(ds.file_path)}
             executor = AnalyticalPlanExecutor(loaded, relationships)
+            executor.validate(plan, user_context)
+            plan_validated = True
             output = executor.execute(plan, user_context, provenance)
-        except (PlanError, PermissionError, KeyError, FileNotFoundError, ValueError) as err:
-            return QAResult(question=question, status="abstained", answer=None, reason=str(err))
-        return QAResult(question=question, status="answered", answer=output["outputs"],
-                        operation="multi_step_analytics", calculation_method="Executed validated deterministic analytical plan.",
-                        evidence=output["evidence"])
+        except Exception as err:
+            failure_record = not_executed_record("plan_validation_or_execution_failed",
+                                                  operation="multi_step_analytics")
+            if plan_validated:
+                failure_record["status"] = "failed"
+                failure_record["operations_known"] = False
+                failure_record["limitations"] = ["The validated plan failed during execution; a complete step trace is unavailable."]
+            reason = (f"Execution failed ({type(err).__name__}); no result was verified."
+                      if plan_validated else str(err))
+            result = QAResult(question=question, status="abstained", answer=None, reason=reason,
+                              operation="multi_step_analytics",
+                              evidence={"execution": failure_record})
+            result.explanation = deterministic_explanation(result, "requested datasets")
+            result.explanation_source = "deterministic_execution_evidence"
+            return result
+        result = QAResult(question=question, status="answered", answer=output["outputs"],
+                          operation="multi_step_analytics", calculation_method="Executed validated deterministic analytical plan.",
+                          evidence=output["evidence"])
+        result.explanation = deterministic_explanation(result, "multiple datasets")
+        result.explanation_source = "deterministic_execution_evidence"
+        return result

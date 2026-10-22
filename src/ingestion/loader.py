@@ -1,30 +1,38 @@
-import csv
+"""CSV/JSON dataset ingestion with deterministic schema and quality metadata."""
+
+import hashlib
 import json
+import math
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
-from dataclasses import dataclass
 
-from src.ingestion.profile import profile_dataset
+from src.ingestion.profile import profile_records, read_dataset_records
 
 
 def to_number(val: Any) -> Optional[Union[int, float]]:
-    """Convert value to int or float if possible, otherwise return None."""
-    if val is None:
+    """Parse finite numeric values without converting booleans or invalid tokens."""
+    if val is None or isinstance(val, bool):
         return None
-    if isinstance(val, (int, float)) and not isinstance(val, bool):
+    if isinstance(val, int):
         return val
+    if isinstance(val, float):
+        return val if math.isfinite(val) else None
     s = str(val).strip()
     if not s:
         return None
-    try:
-        if "." in s or "e" in s.lower():
-            return float(s)
-        return int(s)
-    except ValueError:
+    if not any(char in s.lower() for char in (".", "e")):
         try:
-            return float(s)
+            return int(s)
         except ValueError:
-            return None
+            pass
+    try:
+        number = float(s)
+    except ValueError:
+        return None
+    if not math.isfinite(number):
+        return None
+    return number
 
 
 @dataclass
@@ -37,116 +45,48 @@ class Dataset:
     profile: Dict[str, Any]
     dataset_id: Optional[str] = None
     dataset_version: Optional[int] = None
+    content_fingerprint: Optional[str] = None
 
     def get_column_values(self, column: str, clean_numeric: bool = False) -> List[Any]:
-        """Return values for a column, optionally converted to numbers."""
+        """Return values for a column, optionally converted to finite numbers."""
         values = []
-        for r in self.rows:
-            v = r.get(column)
+        for row in self.rows:
+            value = row.get(column)
             if clean_numeric:
-                num = to_number(v)
-                if num is not None:
-                    values.append(num)
+                number = to_number(value)
+                if number is not None:
+                    values.append(number)
             else:
-                values.append(v)
+                values.append(value)
         return values
 
 
+def _fingerprint(columns: List[str], rows: List[Dict[str, Any]]) -> str:
+    digest = hashlib.sha256()
+    digest.update(json.dumps(columns, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+    for row in rows:
+        normalized = {column: row.get(column) for column in columns}
+        digest.update(b"\n")
+        digest.update(json.dumps(normalized, sort_keys=True, ensure_ascii=False,
+                                 separators=(",", ":"), default=str).encode("utf-8"))
+    return digest.hexdigest()
+
+
 def load_dataset(file_path: Union[str, Path]) -> Dataset:
-    """
-    Safely load a CSV or JSON dataset using Python's standard library.
-    Validates file format, path existence, and structure without arbitrary execution.
+    """Load a CSV or JSON file and retain source values without implicit coercion.
+
+    This low-level loader parses a caller-selected file. Application entry points
+    must authorize paths before calling it (QAEngine does so via approved roots).
     """
     path = Path(file_path)
-    suffix = path.suffix.lower()
-
-    if suffix not in {".csv", ".json"}:
-        raise ValueError("Supported formats: CSV and JSON.")
-
-    if not path.exists():
-        raise FileNotFoundError(f"Dataset not found: {path}")
-
-    if not path.is_file():
-        raise ValueError(f"Path is not a regular file: {path}")
-
-    # Handle empty files (0 bytes) gracefully
-    if path.stat().st_size == 0:
-        return Dataset(
-            file_path=path,
-            name=path.name,
-            rows=[],
-            columns=[],
-            column_types={},
-            profile={
-                "file": path.name,
-                "row_count": 0,
-                "column_count": 0,
-                "columns": [],
-                "missing_values": {},
-                "column_types": {},
-                "duplicate_rows": 0,
-                "preview": [],
-            },
-        )
-
-    if suffix == ".csv":
-        with path.open("r", encoding="utf-8-sig", newline="") as file:
-            reader = csv.DictReader(file)
-            columns = list(reader.fieldnames or [])
-            rows = list(reader)
-    elif suffix == ".json":
-        with path.open("r", encoding="utf-8-sig") as file:
-            try:
-                data = json.load(file)
-            except json.JSONDecodeError as err:
-                raise ValueError(f"Malformed JSON in dataset: {err}") from err
-
-        if isinstance(data, list):
-            rows = data
-        elif isinstance(data, dict):
-            rows = data.get("data", [data])
-        else:
-            raise ValueError("JSON must contain an object or a list of objects.")
-
-        if not all(isinstance(row, dict) for row in rows):
-            raise ValueError("Dataset rows must be JSON objects.")
-
-        columns = list(dict.fromkeys(
-            key for row in rows for key in row.keys()
-        ))
-
-    # Detect high-level column types (numeric vs text vs empty)
-    column_types: Dict[str, str] = {}
-    for col in columns:
-        vals = [r.get(col) for r in rows]
-        non_empty = [v for v in vals if v is not None and str(v).strip() != ""]
-        if not non_empty:
-            column_types[col] = "empty"
-        elif all(to_number(v) is not None for v in non_empty):
-            column_types[col] = "numeric"
-        else:
-            column_types[col] = "text"
-
-    # Compute dataset profile using existing profiler or inline for consistency
-    try:
-        profile = profile_dataset(path)
-    except Exception:
-        profile = {
-            "file": path.name,
-            "row_count": len(rows),
-            "column_count": len(columns),
-            "columns": columns,
-            "missing_values": {col: sum(r.get(col) is None or str(r.get(col)).strip() == "" for r in rows) for col in columns},
-            "column_types": column_types,
-            "duplicate_rows": 0,
-            "preview": rows[:5],
-        }
-
+    columns, rows, read_warnings = read_dataset_records(path)
+    profile = profile_records(path.name, columns, rows, read_warnings)
     return Dataset(
         file_path=path,
         name=path.name,
         rows=rows,
         columns=columns,
-        column_types=column_types,
+        column_types=profile["column_types"],
         profile=profile,
+        content_fingerprint=_fingerprint(columns, rows),
     )

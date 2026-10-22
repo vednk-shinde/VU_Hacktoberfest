@@ -15,7 +15,11 @@ class TestDatasetLifecycle(unittest.TestCase):
         self.storage_root = Path(self.temp_dir.name) / "storage"
         self.storage_mgr = StorageManager(base_dir=self.storage_root)
         self.store = DatasetRegistryStore(db_path=self.storage_root / "registry.db")
-        self.service = DatasetRegistryService(store=self.store, storage_manager=self.storage_mgr)
+        self.service = DatasetRegistryService(
+            store=self.store,
+            storage_manager=self.storage_mgr,
+            approved_source_roots=[Path.cwd() / "data", self.temp_dir.name],
+        )
 
         self.sample_csv = "data/sample.csv"
         self.sample_json = "data/sample.json"
@@ -50,6 +54,7 @@ class TestDatasetLifecycle(unittest.TestCase):
         # Schema profile integrity
         self.assertEqual(ver.schema_profile["row_count"], 5)
         self.assertEqual(sorted(ver.schema_profile["columns"]), sorted(["employee", "department", "salary"]))
+        self.assertNotIn("preview", ver.schema_profile)
 
         # Registry retrieval check
         active = self.service.get_active_dataset("test_emp_01")
@@ -61,6 +66,20 @@ class TestDatasetLifecycle(unittest.TestCase):
         with self.assertRaises(ValueError) as ctx:
             self.service.add_dataset(self.sample_csv, name="Duplicate", dataset_id="dup_id")
         self.assertIn("already exists", str(ctx.exception))
+
+    def test_registry_rejects_sources_outside_approved_import_roots(self):
+        external_root = tempfile.TemporaryDirectory()
+        self.addCleanup(external_root.cleanup)
+        external = Path(external_root.name) / "outside.csv"
+        external.write_text("id\n1\n", encoding="utf-8")
+        with self.assertRaisesRegex(PermissionError, "approved import roots"):
+            self.service.add_dataset(external, name="Outside")
+
+    def test_legacy_type_counters_do_not_create_false_schema_diff(self):
+        from src.registry.service import detect_schema_diff
+        old = {"columns": ["value"], "column_types": {"value": {"str": 2}}, "row_count": 2}
+        new = {"columns": ["value"], "column_types": {"value": "numeric"}, "row_count": 2}
+        self.assertEqual(detect_schema_diff(old, new)["type_changes"], {})
 
     # --- 2. Path Traversal & Filename Sanitization ---
 

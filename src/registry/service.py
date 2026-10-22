@@ -7,6 +7,13 @@ from src.registry.store import DatasetRegistryStore
 from src.storage.manager import StorageManager, sanitize_filename
 
 
+def _registry_profile(file_path: Union[str, Path]) -> Dict[str, Any]:
+    """Persist schema/quality metadata only; row previews may contain personal data."""
+    profile = profile_dataset(file_path)
+    profile.pop("preview", None)
+    return profile
+
+
 def detect_schema_diff(
     old_schema: Dict[str, Any],
     new_schema: Dict[str, Any],
@@ -25,7 +32,9 @@ def detect_schema_diff(
     for col in old_cols.intersection(new_cols):
         ot = old_types.get(col)
         nt = new_types.get(col)
-        if ot != nt:
+        # Older registry records stored raw Python type counters rather than inferred labels.
+        # Treat those legacy counters as unknown instead of reporting false schema changes.
+        if isinstance(ot, str) and isinstance(nt, str) and ot != nt:
             type_changes[col] = {"from": ot, "to": nt}
 
     return {
@@ -47,9 +56,19 @@ class DatasetRegistryService:
         self,
         store: Optional[DatasetRegistryStore] = None,
         storage_manager: Optional[StorageManager] = None,
+        approved_source_roots: Optional[List[Union[str, Path]]] = None,
     ):
         self.store = store or DatasetRegistryStore()
         self.storage = storage_manager or StorageManager()
+        self.approved_source_roots = [Path(root).resolve() for root in (approved_source_roots or [])]
+
+    def _approved_source(self, file_path: Union[str, Path]) -> Path:
+        path = Path(file_path).resolve()
+        if not path.is_file():
+            raise FileNotFoundError(f"Dataset file not found: {path.name}")
+        if not any(path == root or root in path.parents for root in self.approved_source_roots):
+            raise PermissionError("Dataset source is outside configured approved import roots.")
+        return path
 
     def add_dataset(
         self,
@@ -61,9 +80,7 @@ class DatasetRegistryService:
         """
         Operation 1: Add a new dataset without affecting existing datasets.
         """
-        src_path = Path(file_path)
-        if not src_path.exists():
-            raise FileNotFoundError(f"Dataset file not found: {src_path}")
+        src_path = self._approved_source(file_path)
 
         ext = src_path.suffix.lower()
         if ext not in {".csv", ".json"}:
@@ -91,7 +108,7 @@ class DatasetRegistryService:
 
         # 2. Profile and validate schema
         try:
-            profile = profile_dataset(staged_path)
+            profile = _registry_profile(staged_path)
         except Exception as err:
             self.storage.cleanup_staging(d_id, version_num)
             raise ValueError(f"Dataset validation failed during profiling: {err}") from err
@@ -144,9 +161,7 @@ class DatasetRegistryService:
         if not current_record:
             raise KeyError(f"Dataset '{d_id}' not found in registry.")
 
-        src_path = Path(replacement_file_path)
-        if not src_path.exists():
-            raise FileNotFoundError(f"Replacement dataset file not found: {src_path}")
+        src_path = self._approved_source(replacement_file_path)
 
         ext = src_path.suffix.lower()
         if ext not in {".csv", ".json"}:
@@ -188,7 +203,7 @@ class DatasetRegistryService:
 
         # 2. Validate and profile candidate file
         try:
-            profile = profile_dataset(staged_path)
+            profile = _registry_profile(staged_path)
             candidate_record.schema_profile = profile
             candidate_record.processing_timestamp = now_utc_iso()
 

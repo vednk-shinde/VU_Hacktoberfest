@@ -25,14 +25,14 @@ CASES = [
     {
         "id": "largest_region_revenue_decline",
         "question": "Which region has the largest percentage revenue decline?",
-        "compiler_support": False,
-        "limitation": "The compiled outputs include regional percentage changes but no rank/selection output.",
+        "compiler_support": True,
+        "limitation": None,
     },
     {
         "id": "products_units_up_revenue_down",
         "question": "Which products have rising units but falling revenue?",
-        "compiler_support": False,
-        "limitation": "The compiled product output is filtered to stock shortages and omits other trending products.",
+        "compiler_support": True,
+        "limitation": None,
         "variant": True,
     },
     {
@@ -44,8 +44,8 @@ CASES = [
     {
         "id": "direct_facts_vs_assumptions",
         "question": "Which conclusions are directly calculated, and which require assumptions about lost sales or recovered revenue?",
-        "compiler_support": False,
-        "limitation": "The executor returns numeric evidence and a scenario field, but does not classify direct findings versus assumptions in its result schema.",
+        "compiler_support": True,
+        "limitation": None,
     },
     {
         "id": "supplier_shortage_modified_sales",
@@ -90,7 +90,7 @@ def independent_expectations(sources):
             }
     regional_periods = grouped(["region"])
     regional_changes = {}
-    for region in {r["region"] for r in sales}:
+    for region in sorted({r["region"] for r in sales}):
         old, new = regional_periods.get((region, "previous")), regional_periods.get((region, "current"))
         if old and new and old["revenue"]:
             regional_changes[region] = {
@@ -108,9 +108,15 @@ def independent_expectations(sources):
             supplier = suppliers[inventory[product]["supplier_id"]]
             shortage_suppliers.append({"product_id": product, "product_name": products[product]["name"],
                                        "supplier_name": supplier["name"],
-                                       "shortage_units": values["units_current"] - stock})
+                                       "shortage_units": values["units_current"] - stock,
+                                       "scenario_revenue_exposure": (
+                                           (values["units_current"] - stock) *
+                                           values["revenue_current"] / values["units_current"]
+                                           if values["units_current"] else None
+                                       )})
     return {
-        "largest_revenue_decline": min(regional_changes, key=lambda r: regional_changes[r]["revenue_change_pct"]),
+        "largest_revenue_decline": min(
+            regional_changes, key=lambda r: (regional_changes[r]["revenue_change_pct"], r)),
         "regional_changes": regional_changes,
         "products_units_up_revenue_down": sorted(
             p for p, v in product_changes.items() if v["units_change"] > 0 and v["revenue_change"] < 0),
@@ -180,12 +186,18 @@ def run_case(case, planner):
     record["execution_latency_ms"] = (time.perf_counter() - started) * 1000
     outputs = result["outputs"]
     actual_risks = [{"product_id": row["product_id"], "product_name": row["product_name"],
-                     "supplier_name": row["supplier_name"], "shortage_units": row["shortage_units"]}
+                     "supplier_name": row["supplier_name"], "shortage_units": row["shortage_units"],
+                     "scenario_revenue_exposure": row.get("scenario_revenue_exposure")}
                     for row in outputs.get("supplier_risk", [])]
     actual_regions = outputs.get("regional_metrics", [])
+    ranked_regions = outputs.get("regional_decline_ranked", [])
+    actual_trends = outputs.get("product_trends", [])
+    semantics = result.get("evidence", {}).get("execution", {}).get("result_semantics") or {}
     record["observed_relevant_outputs"] = {
         "supplier_risk": actual_risks,
         "regional_metrics": actual_regions,
+        "regional_decline_ranked": ranked_regions,
+        "product_trends": actual_trends,
         "output_names": list(outputs),
     }
     case_id = case["id"]
@@ -196,22 +208,48 @@ def run_case(case, planner):
         expected_by_region = {r: v["revenue_change_pct"] for r, v in expected["regional_changes"].items()}
         evidence_complete = actual_by_region == expected_by_region
         record["computed_evidence_matches_ground_truth"] = evidence_complete
-        record["result_matches_independent_ground_truth"] = False  # no rank/selection is emitted
-        record["exact_failure_reason"] = "The compiled outputs contain the correct regional percentages but emit no selected maximum/ranked region."
+        ranked_region = ranked_regions[0].get("region") if ranked_regions else None
+        record["result_matches_independent_ground_truth"] = (
+            evidence_complete and ranked_region == expected["largest_revenue_decline"])
+        if not record["result_matches_independent_ground_truth"]:
+            record["exact_failure_reason"] = (
+                f"Ranked output selected {ranked_region!r}; independent ground truth is "
+                f"{expected['largest_revenue_decline']!r}."
+            )
     elif case_id == "products_units_up_revenue_down":
-        actual_ids = sorted({r["product_id"] for r in actual_risks})
+        actual_ids = sorted({r["product_id"] for r in actual_trends})
         record["actual_emitted_product_ids"] = actual_ids
         record["result_matches_independent_ground_truth"] = actual_ids == expected["products_units_up_revenue_down"]
         if not record["result_matches_independent_ground_truth"]:
             record["exact_failure_reason"] = (
-                f"Compiled supplier_risk emitted products {actual_ids}; independent trend calculation requires "
-                f"{expected['products_units_up_revenue_down']}. The plan's stock filter omits trend-qualified products without shortages."
+                f"Compiled product_trends emitted products {actual_ids}; independent trend calculation requires "
+                f"{expected['products_units_up_revenue_down']}."
             )
     elif case_id == "direct_facts_vs_assumptions":
-        has_scenario = any("scenario_revenue_exposure" in row for row in actual_risks)
-        record["scenario_value_present"] = has_scenario
-        record["result_matches_independent_ground_truth"] = False  # no direct-vs-assumption classification returned
-        record["exact_failure_reason"] = "Executor returns metrics but no direct-versus-assumption classification or assumption metadata."
+        classification_complete = (
+            bool(semantics.get("source_facts")) and
+            set(semantics.get("computed_results", {})) == set(outputs) and
+            any(item.get("metric") == "scenario_revenue_exposure"
+                and "not observed" in item.get("description", "").lower()
+                for item in semantics.get("assumptions", []) if isinstance(item, dict))
+        )
+        regional_values = {row["region"]: row.get("revenue_change_pct") for row in actual_regions}
+        expected_regional_values = {
+            region: values["revenue_change_pct"]
+            for region, values in expected["regional_changes"].items()
+        }
+        computed_metrics_match = (
+            actual_risks == expected["shortage_suppliers"] and
+            regional_values == expected_regional_values
+        )
+        record["result_semantics"] = semantics
+        record["computed_evidence_matches_ground_truth"] = computed_metrics_match
+        record["result_matches_independent_ground_truth"] = classification_complete and computed_metrics_match
+        if not record["result_matches_independent_ground_truth"]:
+            record["exact_failure_reason"] = (
+                "Computed facts differ from independent ground truth or execution evidence does not "
+                "clearly separate source facts, computed results, and unobserved assumptions."
+            )
     return record
 
 
@@ -219,21 +257,20 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, help="Optional JSON report path.")
     args = parser.parse_args()
-    client = OllamaClient(model_name="gemma3:4b", timeout_seconds=90)
+    client = OllamaClient()
     if not client.is_healthy():
         raise SystemExit("Local Ollama is unavailable; no evaluation cases were run.")
     planner = GemmaQueryPlanner(client)
     cases = [run_case(case, planner) for case in CASES]
     report = {
-        "model": "gemma3:4b", "fallback_policy": "none; invalid plans are recorded and not executed",
+        "model": client.model_name, "fallback_policy": "none; invalid plans are recorded and not executed",
         "evaluation_count": len(cases), "cases": cases,
         "success_count": sum(c["planning_success"] and c["proposal_validation_success"] and
                               c["compiled_plan_validation_success"] and c["compiled_plan_executed"] and
                               c["result_matches_independent_ground_truth"] and not c["fallback_used"]
                               for c in cases),
         "limitations": [
-            "The current planner accepts one fixed workflow proposal shape regardless of requested output intent.",
-            "The compiler emits supplier_risk and regional_metrics only; it does not rank regions, list all products by trend, or classify evidence versus assumptions.",
+            "The planner and compiler support the fixed four-dataset sales/inventory workflow, not arbitrary schemas or natural-language analyses.",
         ],
     }
     rendered = json.dumps(report, indent=2, ensure_ascii=False)

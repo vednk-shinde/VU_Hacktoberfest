@@ -25,7 +25,7 @@ def proposal():
         "datasets": {name: name for name in SCHEMAS},
         "columns": {name: list(cols) for name, cols in SCHEMAS.items()},
         "relationships": RELATIONSHIPS,
-        "operations": ["scan", "filter", "aggregate", "compare_periods", "derive", "join"],
+        "operations": ["scan", "filter", "aggregate", "compare_periods", "derive", "join", "rank"],
         "previous_period": "previous", "current_period": "current",
     }
 
@@ -57,7 +57,7 @@ class TestGemmaWorkflowPlanner(unittest.TestCase):
         self.assertEqual(result["metrics"]["repair_attempts"], 1)
         repair_prompt = client.generate.call_args_list[1].kwargs["prompt"]
         self.assertIn("Operation entries must be strings", repair_prompt)
-        self.assertIn('["scan", "filter", "aggregate", "compare_periods", "derive", "join"]', repair_prompt)
+        self.assertIn('["scan", "filter", "aggregate", "compare_periods", "derive", "join", "rank"]', repair_prompt)
         self.assertIn('"right_dataset": "suppliers"', repair_prompt)
 
     def test_compiler_required_column_omission_gets_repaired(self):

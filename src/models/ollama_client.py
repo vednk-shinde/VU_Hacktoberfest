@@ -1,5 +1,8 @@
 import json
+import math
+import os
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Any, Dict, Optional
 
@@ -12,13 +15,41 @@ class OllamaClient:
 
     def __init__(
         self,
-        base_url: str = "http://localhost:11434",
-        model_name: str = "gemma3:4b",
-        timeout_seconds: float = 30.0,
+        base_url: Optional[str] = None,
+        model_name: Optional[str] = None,
+        timeout_seconds: Optional[float] = None,
     ):
-        self.base_url = base_url.rstrip("/")
-        self.model_name = model_name
-        self.timeout = timeout_seconds
+        configured_url = base_url or os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+        try:
+            parsed_url = urllib.parse.urlsplit(configured_url)
+            port = parsed_url.port
+        except (TypeError, ValueError) as err:
+            raise ValueError("Ollama base URL is malformed.") from err
+        if (parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc or
+                parsed_url.username or parsed_url.password or
+                parsed_url.hostname not in {"localhost", "127.0.0.1", "::1"}):
+            raise ValueError("Ollama base URL must use a loopback HTTP(S) address without embedded credentials.")
+        if port is not None and not 1 <= port <= 65535:
+            raise ValueError("Ollama base URL port must be between 1 and 65535.")
+
+        configured_timeout = timeout_seconds
+        if configured_timeout is None:
+            timeout_value = os.environ.get("OLLAMA_TIMEOUT_SECONDS", "90")
+            configured_timeout = timeout_value
+        try:
+            configured_timeout = float(configured_timeout)
+        except (TypeError, ValueError) as err:
+            raise ValueError("OLLAMA_TIMEOUT_SECONDS must be a positive finite number.") from err
+        if not math.isfinite(configured_timeout) or configured_timeout <= 0:
+            raise ValueError("Ollama timeout must be greater than zero.")
+
+        configured_model = model_name or os.environ.get("OLLAMA_MODEL", "gemma3:4b")
+        if not configured_model.strip():
+            raise ValueError("Ollama model name cannot be empty.")
+
+        self.base_url = configured_url.rstrip("/")
+        self.model_name = configured_model.strip()
+        self.timeout = configured_timeout
 
     def is_healthy(self) -> bool:
         """Checks whether the local Ollama service is reachable."""
@@ -88,14 +119,27 @@ class OllamaClient:
                     raise RuntimeError(f"Ollama returned HTTP error status {resp.status}")
                 raw_bytes = resp.read()
                 data = json.loads(raw_bytes.decode("utf-8"))
+        except urllib.error.HTTPError as err:
+            try:
+                detail = err.read(500).decode("utf-8", errors="replace").strip()
+            except Exception:
+                detail = ""
+            suffix = f": {detail}" if detail else ""
+            raise RuntimeError(f"Ollama returned HTTP {err.code}{suffix}") from err
         except urllib.error.URLError as err:
             raise RuntimeError(
                 f"Local Ollama service unreachable at {self.base_url}. Error: {err}"
             ) from err
         except TimeoutError as err:
             raise TimeoutError(f"Ollama inference timed out after {self.timeout}s.") from err
+        except json.JSONDecodeError as err:
+            raise ValueError("Ollama returned a malformed JSON response envelope.") from err
 
+        if not isinstance(data, dict):
+            raise ValueError("Ollama returned an invalid response: expected a JSON object.")
         raw_response = data.get("response", "")
+        if not isinstance(raw_response, str):
+            raise ValueError("Ollama returned an invalid response: 'response' must be text.")
 
         # If format_type is json, parse inner response text to a Python dictionary
         if format_type == "json":
@@ -112,6 +156,8 @@ class OllamaClient:
                 raise ValueError(
                     f"Model returned invalid JSON syntax: {raw_response[:200]}"
                 ) from err
+            if not isinstance(parsed_json, (dict, list)):
+                raise ValueError("Model returned JSON, but the structured response must be an object or array.")
 
         return {
             "parsed": None,

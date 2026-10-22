@@ -5,6 +5,7 @@ from src.models.ollama_client import OllamaClient
 from src.reasoning.intents import AggFunction, Operation
 from src.reasoning.parser import extract_candidate_column
 from src.verification.evaluator import QAResult
+from src.verification.evidence import deterministic_explanation
 
 
 VALID_OPERATIONS = {
@@ -163,9 +164,9 @@ class GemmaQueryPlanner:
     def propose_analytical_plan(self, question: str, schemas: Dict[str, Dict[str, str]],
                                 relationships: List[Dict[str, str]]) -> Dict[str, Any]:
         """Ask Gemma for a closed, schema-grounded workflow proposal; invalid output fails closed."""
-        allowed_ops = ["scan", "filter", "aggregate", "compare_periods", "derive", "join"]
+        allowed_ops = ["scan", "filter", "aggregate", "compare_periods", "derive", "join", "rank"]
         system = f"""Return only one JSON object with exactly these keys and value types:
-{{"workflow":"inventory_sales_regional_comparison","datasets":{{"products":"products","sales":"sales","inventory":"inventory","suppliers":"suppliers"}},"columns":{{"products":["column_name"],"sales":["column_name"],"inventory":["column_name"],"suppliers":["column_name"]}},"relationships":[{{"left_dataset":"...","left_key":"...","right_dataset":"...","right_key":"..."}}],"operations":["scan","filter","aggregate","compare_periods","derive","join"],"previous_period":"previous","current_period":"current"}}
+{{"workflow":"inventory_sales_regional_comparison","datasets":{{"products":"products","sales":"sales","inventory":"inventory","suppliers":"suppliers"}},"columns":{{"products":["column_name"],"sales":["column_name"],"inventory":["column_name"],"suppliers":["column_name"]}},"relationships":[{{"left_dataset":"...","left_key":"...","right_dataset":"...","right_key":"..."}}],"operations":["scan","filter","aggregate","compare_periods","derive","join","rank"],"previous_period":"previous","current_period":"current"}}
 The `operations` value MUST be a flat JSON array of operation-name strings exactly from this allowlist: {json.dumps(allowed_ops)}. Do not put step descriptions, argument lists, arrays, objects, or tuples inside `operations`. Do not add aliases to operation names.
 The `columns` value MUST map each dataset to a flat array of column-name strings (no nested arrays), and must include all columns required by the workflow: {json.dumps({k: sorted(v) for k, v in REQUIRED_WORKFLOW_COLUMNS.items()})}. Use only dataset and column names provided. The only supported workflow is inventory_sales_regional_comparison. Include every supplied approved relationship exactly once. This is a proposal, not an answer: do not add results, steps, SQL, explanations, or other fields. Period labels must be exactly previous and current. If unsupported, return {{"workflow":"unsupported"}}."""
         prompt = json.dumps({"question": question, "actual_dataset_schemas": schemas,
@@ -223,7 +224,7 @@ The `columns` value MUST map each dataset to a flat array of column-name strings
             missing = REQUIRED_WORKFLOW_COLUMNS.get(name, set()) - set(cols)
             if missing:
                 raise ValueError(f"Column selection for {name} omits compiler-required columns: {sorted(missing)}.")
-        allowed_ops = {"scan", "filter", "aggregate", "compare_periods", "derive", "join"}
+        allowed_ops = {"scan", "filter", "aggregate", "compare_periods", "derive", "join", "rank"}
         if not isinstance(plan["operations"], list) or not plan["operations"]:
             raise ValueError(f"Operations must be a non-empty list; allowed operations: {sorted(allowed_ops)}.")
         non_string_ops = [op for op in plan["operations"] if not isinstance(op, str)]
@@ -257,35 +258,5 @@ The `columns` value MUST map each dataset to a flat array of column-name strings
         dataset_name: str,
         dataset_version: Optional[int] = None,
     ) -> str:
-        """
-        Requests Gemma 3 4B to generate a grounded natural language summary
-        using ONLY verified calculation results and evidence.
-        """
-        if result.status == "abstained":
-            return f"I cannot answer this question because: {result.reason}"
-
-        system_prompt = (
-            "You are an enterprise AI assistant explaining verified calculations.\n"
-            "Explain the answer clearly and concisely.\n"
-            "RULES:\n"
-            "1. You MUST ONLY use the provided verified answer, calculation method, and evidence.\n"
-            "2. Never hallucinate, extrapolate, or invent figures not in the evidence.\n"
-            "3. Mention the dataset name and dataset version used."
-        )
-
-        prompt = (
-            f"Question: {question}\n"
-            f"Dataset: {dataset_name} (Version: {dataset_version or 1})\n"
-            f"Verified Answer: {result.answer}\n"
-            f"Calculation Method: {result.calculation_method}\n"
-            f"Evidence: {json.dumps(result.evidence, default=str)}\n\n"
-            "Please provide a factual, 1-2 sentence response explaining this result to the user."
-        )
-
-        res = self.client.generate(
-            prompt=prompt,
-            system=system_prompt,
-            format_type=None,
-            temperature=0.1,
-        )
-        return res.get("raw", "").strip()
+        """Return a deterministic explanation; model prose is not trusted as evidence."""
+        return deterministic_explanation(result, dataset_name, dataset_version)
