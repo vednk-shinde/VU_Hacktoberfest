@@ -1,0 +1,11 @@
+id,name,department,role,salary,experience_years,rating
+1,Alex Rivera,Engineering,Software Engineer,85000,4,4.5
+2,Jordan Lee,Sales,Account Executive,62000,3,4.0
+3,Taylor Kim,Engineering,Staff Engineer,125000,8,4.8
+4,Morgan Chen,Marketing,Content Specialist,55000,2,3.9
+5,Casey Patel,Sales,Sales Manager,95000,6,4.2
+6,Samara Noor,Engineering,Frontend Engineer,78000,3,
+7,Devon Vance,Marketing,Marketing Lead,88000,,4.6
+8,Robin Brooks,Finance,Financial Analyst,72000,4,4.1
+2,Jordan Lee,Sales,Account Executive,62000,3,4.0
+10,Jamie Diaz,Finance,Controller,110000,9,4.9

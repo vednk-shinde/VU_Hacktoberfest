@@ -1,0 +1,7 @@
+product_id,region,period,units,revenue
+P100,East,previous,100,20000
+P100,East,current,150,18000
+P200,East,previous,50,10000
+P200,East,current,20,6000
+P300,West,previous,40,8000
+P300,West,current,45,9000

@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.py[cod]
+.env
+data/*
+!data/.gitkeep
+!data/enterprise_demo/
+!data/enterprise_demo/*.csv
+/models/
+*.safetensors
+*.gguf
+.pytest_cache/
+.coverage

@@ -1,0 +1,4 @@
+product_id,on_hand,supplier_id
+P100,30,SLOW
+P200,200,FAST
+P300,80,FAST

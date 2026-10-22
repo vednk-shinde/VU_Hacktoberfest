@@ -1,0 +1,3 @@
+supplier_id,name,lead_time_days,defect_rate
+SLOW,Northstar Supply,21,0.02
+FAST,Quickship Partners,4,0.01

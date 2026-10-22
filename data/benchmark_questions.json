@@ -1,0 +1,242 @@
+[
+  {
+    "id": "bm_01",
+    "dataset": "data/sample.csv",
+    "question": "How many rows are in the dataset?",
+    "expected_status": "answered",
+    "expected_answer": 5,
+    "category": "row_count"
+  },
+  {
+    "id": "bm_02",
+    "dataset": "data/sample.json",
+    "question": "Total records in dataset",
+    "expected_status": "answered",
+    "expected_answer": 3,
+    "category": "row_count"
+  },
+  {
+    "id": "bm_03",
+    "dataset": "data/synthetic_employees.csv",
+    "question": "What is the row count?",
+    "expected_status": "answered",
+    "expected_answer": 10,
+    "category": "row_count"
+  },
+  {
+    "id": "bm_04",
+    "dataset": "data/sample.csv",
+    "question": "What are the columns?",
+    "expected_status": "answered",
+    "expected_answer": ["employee", "department", "salary"],
+    "category": "column_names"
+  },
+  {
+    "id": "bm_05",
+    "dataset": "data/sample.json",
+    "question": "List columns in the dataset",
+    "expected_status": "answered",
+    "expected_answer": ["product", "price", "stock"],
+    "category": "column_names"
+  },
+  {
+    "id": "bm_06",
+    "dataset": "data/sample.csv",
+    "question": "How many missing values in salary?",
+    "expected_status": "answered",
+    "expected_answer": 1,
+    "category": "missing_values"
+  },
+  {
+    "id": "bm_07",
+    "dataset": "data/sample.json",
+    "question": "Missing values in stock",
+    "expected_status": "answered",
+    "expected_answer": 1,
+    "category": "missing_values"
+  },
+  {
+    "id": "bm_08",
+    "dataset": "data/synthetic_employees.csv",
+    "question": "Total missing values in dataset",
+    "expected_status": "answered",
+    "expected_answer": 2,
+    "category": "missing_values"
+  },
+  {
+    "id": "bm_09",
+    "dataset": "data/sample.csv",
+    "question": "How many duplicate rows are there?",
+    "expected_status": "answered",
+    "expected_answer": 1,
+    "category": "duplicate_count"
+  },
+  {
+    "id": "bm_10",
+    "dataset": "data/sample.json",
+    "question": "Count duplicates in the dataset",
+    "expected_status": "answered",
+    "expected_answer": 0,
+    "category": "duplicate_count"
+  },
+  {
+    "id": "bm_11",
+    "dataset": "data/synthetic_employees.csv",
+    "question": "Number of duplicate rows",
+    "expected_status": "answered",
+    "expected_answer": 1,
+    "category": "duplicate_count"
+  },
+  {
+    "id": "bm_12",
+    "dataset": "data/sample.csv",
+    "question": "What is the average salary?",
+    "expected_status": "answered",
+    "expected_answer": 63500.0,
+    "category": "numeric_aggregation"
+  },
+  {
+    "id": "bm_13",
+    "dataset": "data/sample.csv",
+    "question": "What is the maximum salary?",
+    "expected_status": "answered",
+    "expected_answer": 72000,
+    "category": "numeric_aggregation"
+  },
+  {
+    "id": "bm_14",
+    "dataset": "data/sample.csv",
+    "question": "What is the minimum salary?",
+    "expected_status": "answered",
+    "expected_answer": 52000,
+    "category": "numeric_aggregation"
+  },
+  {
+    "id": "bm_15",
+    "dataset": "data/sample.csv",
+    "question": "What is the total salary?",
+    "expected_status": "answered",
+    "expected_answer": 254000,
+    "category": "numeric_aggregation"
+  },
+  {
+    "id": "bm_16",
+    "dataset": "data/sample.json",
+    "question": "What is the maximum price?",
+    "expected_status": "answered",
+    "expected_answer": 75000,
+    "category": "numeric_aggregation"
+  },
+  {
+    "id": "bm_17",
+    "dataset": "data/sample.json",
+    "question": "What is the minimum price?",
+    "expected_status": "answered",
+    "expected_answer": 800,
+    "category": "numeric_aggregation"
+  },
+  {
+    "id": "bm_18",
+    "dataset": "data/sample.json",
+    "question": "Total stock in inventory",
+    "expected_status": "answered",
+    "expected_answer": 52,
+    "category": "numeric_aggregation"
+  },
+  {
+    "id": "bm_19",
+    "dataset": "data/synthetic_employees.csv",
+    "question": "What is the average salary?",
+    "expected_status": "answered",
+    "expected_answer": 83200.0,
+    "category": "numeric_aggregation"
+  },
+  {
+    "id": "bm_20",
+    "dataset": "data/sample.csv",
+    "question": "Count by department",
+    "expected_status": "answered",
+    "expected_answer": {"Engineering": 3, "Sales": 1, "Marketing": 1},
+    "category": "category_count"
+  },
+  {
+    "id": "bm_21",
+    "dataset": "data/synthetic_employees.csv",
+    "question": "Breakdown by department",
+    "expected_status": "answered",
+    "expected_answer": {"Engineering": 3, "Sales": 3, "Marketing": 2, "Finance": 2},
+    "category": "category_count"
+  },
+  {
+    "id": "bm_22",
+    "dataset": "data/sample.csv",
+    "question": "How many employees are in Engineering?",
+    "expected_status": "answered",
+    "expected_answer": 3,
+    "category": "filtering"
+  },
+  {
+    "id": "bm_23",
+    "dataset": "data/sample.json",
+    "question": "How many products where price > 1000?",
+    "expected_status": "answered",
+    "expected_answer": 2,
+    "category": "filtering"
+  },
+  {
+    "id": "bm_24",
+    "dataset": "data/sample.csv",
+    "question": "What is the average bonus?",
+    "expected_status": "abstained",
+    "expected_answer": null,
+    "category": "missing_column"
+  },
+  {
+    "id": "bm_25",
+    "dataset": "data/synthetic_employees.csv",
+    "question": "Count by location",
+    "expected_status": "abstained",
+    "expected_answer": null,
+    "category": "missing_column"
+  },
+  {
+    "id": "bm_26",
+    "dataset": "data/sample.csv",
+    "question": "What is the sum of department?",
+    "expected_status": "abstained",
+    "expected_answer": null,
+    "category": "invalid_operation"
+  },
+  {
+    "id": "bm_27",
+    "dataset": "data/sample.csv",
+    "question": "What is the capital of France?",
+    "expected_status": "abstained",
+    "expected_answer": null,
+    "category": "unsupported"
+  },
+  {
+    "id": "bm_28",
+    "dataset": "data/sample.json",
+    "question": "Predict the stock next week",
+    "expected_status": "abstained",
+    "expected_answer": null,
+    "category": "unsupported"
+  },
+  {
+    "id": "bm_29",
+    "dataset": "data/sample.csv",
+    "question": "What is the value?",
+    "expected_status": "abstained",
+    "expected_answer": null,
+    "category": "ambiguous"
+  },
+  {
+    "id": "bm_30",
+    "dataset": "data/sample.csv",
+    "question": "How much?",
+    "expected_status": "abstained",
+    "expected_answer": null,
+    "category": "ambiguous"
+  }
+]
